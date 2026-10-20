@@ -5,7 +5,11 @@ import { TtsError } from "./http";
 // Official endpoint: POST {base}/models/{model}:generateContent with AUDIO output.
 // Docs: https://ai.google.dev/gemini-api/docs/speech-generation
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-const DEFAULT_MODEL = "gemini-3.8-flash-tts";
+/**
+ * Tried in order. Free-tier quotas are counted per model, so when one model's
+ * daily quota is used up (or it isn't available to this key) we move on to the next.
+ */
+const DEFAULT_MODELS = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts"];
 
 /** A provider 429 asking us to wait longer than this is treated as a quota (daily) limit. */
 const MAX_TRANSIENT_RETRY_AFTER_S = 120;
@@ -14,8 +18,29 @@ function baseUrl(): string {
   return (process.env.GEMINI_API_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
-function model(): string {
-  return process.env.GEMINI_TTS_MODEL || DEFAULT_MODEL;
+function models(): string[] {
+  const configured = (process.env.GEMINI_TTS_MODELS ?? "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  return configured.length ? configured : DEFAULT_MODELS;
+}
+
+// Models whose daily quota is exhausted (or that this key can't use), with the
+// time they may be tried again. Per server instance.
+const unavailableUntil = new Map<string, number>();
+
+/** Free-tier daily quotas reset at midnight Pacific time. */
+function nextPacificMidnight(now = Date.now()): number {
+  const pacific = new Date(new Date(now).toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const offset = now - pacific.getTime();
+  pacific.setHours(24, 0, 0, 0);
+  return pacific.getTime() + offset;
+}
+
+function availableModels(): string[] {
+  const now = Date.now();
+  return models().filter((m) => (unavailableUntil.get(m) ?? 0) <= now);
 }
 
 export function isConfigured(): boolean {
@@ -127,16 +152,56 @@ function toWav(mimeType: string, bytes: Uint8Array): Uint8Array {
   throw new TtsError("provider_error", 502, "The voice service returned an unsupported audio format.", true);
 }
 
-/** Synthesizes one chunk; returns a complete WAV file. */
+/** Thrown when a model can't be used right now; synthesize() falls through to the next model. */
+class ModelUnavailable extends Error {
+  constructor(public readonly until: number, public readonly cause: TtsError) {
+    super(cause.message);
+  }
+}
+
+/**
+ * Synthesizes one chunk; returns a complete WAV file. Tries each configured
+ * model in order, skipping models whose free daily quota is used up.
+ */
 export async function synthesize(text: string, voice: string, signal?: AbortSignal): Promise<Uint8Array> {
   const key = apiKey();
+  const candidates = availableModels();
+  let lastQuotaError: TtsError | undefined;
+  for (const m of candidates) {
+    try {
+      return await synthesizeWith(m, key, text, voice, signal);
+    } catch (err) {
+      if (!(err instanceof ModelUnavailable)) throw err;
+      unavailableUntil.set(m, err.until);
+      console.error(`[tts] model ${m} unavailable (${err.cause.code}); trying next model`);
+      if (err.cause.code === "provider_quota") lastQuotaError = err.cause;
+    }
+  }
+  throw (
+    lastQuotaError ??
+    new TtsError(
+      "provider_quota",
+      429,
+      "The free Gemini quota for today is used up on all voice models. Completed parts are kept — try again tomorrow (quotas reset at midnight Pacific time), or enable billing for higher limits.",
+      false,
+    )
+  );
+}
+
+async function synthesizeWith(
+  modelId: string,
+  key: string,
+  text: string,
+  voice: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
   const timeout = AbortSignal.timeout(timeoutMs());
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
   let res: Response;
   let json: GenerateContentResponse;
   try {
-    res = await fetch(`${baseUrl()}/models/${encodeURIComponent(model())}:generateContent`, {
+    res = await fetch(`${baseUrl()}/models/${encodeURIComponent(modelId)}:generateContent`, {
       method: "POST",
       headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -149,10 +214,20 @@ export async function synthesize(text: string, voice: string, signal?: AbortSign
       signal: combined,
       cache: "no-store",
     });
-    if (!res.ok) throw await mapProviderError(res);
+    if (!res.ok) {
+      const mapped = await mapProviderError(res);
+      // Model not available to this key → skip it for an hour.
+      if (res.status === 404) throw new ModelUnavailable(Date.now() + 60 * 60_000, mapped);
+      // Daily quota for this model used up → skip it until the quota resets.
+      if (mapped.code === "provider_quota") {
+        const until = mapped.retryAfterSeconds && mapped.retryAfterSeconds > 120 ? Date.now() + mapped.retryAfterSeconds * 1000 : nextPacificMidnight();
+        throw new ModelUnavailable(until, mapped);
+      }
+      throw mapped;
+    }
     json = (await res.json()) as GenerateContentResponse;
   } catch (err) {
-    if (err instanceof TtsError) throw err;
+    if (err instanceof TtsError || err instanceof ModelUnavailable) throw err;
     throw toNetworkError(err, timeout);
   }
 

@@ -4,7 +4,7 @@ import { TtsError, assertSameOrigin, clientIp, errorResponse, readJsonBody } fro
 import { reserveSynthesis } from "@/lib/tts/server/rate-limit";
 import { synthesize } from "@/lib/tts/server/gemini";
 
-// One request synthesizes one ≤3,000-char part (~3–4 min of audio). Generation
+// One request synthesizes one ≤4,500-char part (~5 min of audio). Generation
 // can take a while, so allow up to 5 minutes; long texts are a sequence of these.
 export const maxDuration = 300;
 

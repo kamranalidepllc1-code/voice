@@ -8,11 +8,11 @@ export const MAX_CHARS = 40_000;
 
 /**
  * Gemini TTS models accept 8,192 input tokens and 16,384 output tokens per
- * request (audio is ~25 tokens/s, so ~10 min max). 3,000 chars ≈ 3–4 min of
+ * request (audio is ~25 tokens/s, so ~10 min max). 4,500 chars ≈ 5 min of
  * speech keeps each request comfortably inside both limits while using few
  * requests — important because free-tier daily request quotas are small.
  */
-export const CHUNK_CHARS = 3000;
+export const CHUNK_CHARS = 4500;
 
 /** Merged output: 24 kHz, 16-bit, mono WAV (Gemini's native TTS output). */
 export const AUDIO_MIME = "audio/wav";

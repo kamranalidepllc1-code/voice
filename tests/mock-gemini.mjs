@@ -6,6 +6,9 @@
 //   RATELIMIT → 429 per-minute once (retryDelay 1s)   DAILYQUOTA → 429 per-day quota
 //   NOAUDIO → 200 without audio once (finishReason OTHER)   SAFETY → 200 blocked (finishReason SAFETY)
 //   WAVMODE → audio returned as audio/wav instead of L16 PCM   SLOW → never responds in time
+//   PRIMARYQUOTA → per-day quota exhausted on gemini-3.8-flash-tts only (other models work)
+// gemini-2.5-flash-preview-tts is "not available to this key" (404) to exercise skipping.
+// Successful responses carry an X-Mock-Model header naming the model that served them.
 import http from "node:http";
 
 const port = Number(process.argv[2] ?? 4012);
@@ -42,7 +45,10 @@ http
     }
     const m = req.url.match(/^\/v1beta\/models\/([^:]+):generateContent$/);
     if (req.method !== "POST" || !m) return send(res, 404, gErr(404, "NOT_FOUND", "not found"));
-    if (m[1] !== "gemini-3.8-flash-tts") return send(res, 404, gErr(404, "NOT_FOUND", "model not found"));
+    const model = m[1];
+    if (!["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"].includes(model)) {
+      return send(res, 404, gErr(404, "NOT_FOUND", "model not found"));
+    }
 
     let raw = "";
     for await (const c of req) raw += c;
@@ -56,7 +62,7 @@ http
 
     const count = (seen.get(text) ?? 0) + 1;
     seen.set(text, count);
-    process.stdout.write(`[mock] call #${calls} len=${text.length} voice=${voice} attempt=${count}\n`);
+    process.stdout.write(`[mock] call #${calls} model=${model} len=${text.length} voice=${voice} attempt=${count}\n`);
 
     if (text.includes("FAIL500")) return send(res, 500, gErr(500, "INTERNAL", "internal"));
     if (text.includes("FAILONCE") && count === 1) return send(res, 503, gErr(503, "UNAVAILABLE", "overloaded"));
@@ -66,7 +72,7 @@ http
         { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "1s" },
       ]));
     }
-    if (text.includes("DAILYQUOTA")) {
+    if (text.includes("DAILYQUOTA") || (text.includes("PRIMARYQUOTA") && model === "gemini-3.8-flash-tts")) {
       return send(res, 429, gErr(429, "RESOURCE_EXHAUSTED", "quota", [
         { "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] },
         { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "35s" },
@@ -79,6 +85,7 @@ http
     const pcm = Buffer.alloc(text.length * 200, 0x11); // 100 samples per char, 16-bit
     const wavMode = text.includes("WAVMODE");
     const data = wavMode ? Buffer.concat([wavHeader(pcm.length), pcm]) : pcm;
+    res.setHeader("X-Mock-Model", model);
     send(res, 200, {
       candidates: [{
         finishReason: "STOP",

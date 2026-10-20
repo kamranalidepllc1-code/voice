@@ -84,17 +84,17 @@ await run("short text → single part, L16 PCM converted to valid WAV", async ()
   assert.equal(dataBytes(merged), text.length * 200);
 });
 
-await run("~1,000 words → ≤3,000-char parts merged losslessly in order", async () => {
+await run("~1,000 words → ≤4,500-char parts merged losslessly in order", async () => {
   const { plan, merged } = await fullJob(words(1000));
   assert.equal(plan.words, 1000);
-  assert.ok(plan.chunks.length >= 2 && plan.chunks.every((c) => c.length <= 3000));
+  assert.ok(plan.chunks.length >= 2 && plan.chunks.every((c) => c.length <= 4500));
   assert.equal(dataBytes(merged), mockBytes(plan.chunks));
 });
 
 await run("4,000 words → accepted, packed into near-minimal number of requests", async () => {
   const { plan, merged } = await fullJob(words(4000));
   assert.equal(plan.words, 4000);
-  assert.ok(plan.chunks.length <= Math.ceil(plan.chars / 3000) + 2, `parts=${plan.chunks.length} chars=${plan.chars}`);
+  assert.ok(plan.chunks.length <= Math.ceil(plan.chars / 4500) + 2, `parts=${plan.chunks.length} chars=${plan.chars}`);
   assert.ok(plan.estimatedPaidCostUsd > 0.2 && plan.estimatedPaidCostUsd < 1.5, String(plan.estimatedPaidCostUsd));
   assert.equal(dataBytes(merged), mockBytes(plan.chunks));
 });
@@ -138,8 +138,8 @@ await run("invalid options rejected (unknown/missing voice, bad json, wrong cont
   assert.equal(r.status, 415);
 });
 
-await run("part over 3,000 chars and oversized body rejected", async () => {
-  assert.equal((await post("/api/tts", { ...opts, text: "a ".repeat(1600) })).status, 413);
+await run("part over 4,500 chars and oversized body rejected", async () => {
+  assert.equal((await post("/api/tts", { ...opts, text: "a ".repeat(2300) })).status, 413);
   assert.equal((await post("/api/tts", { ...opts, text: "x".repeat(40_000) })).status, 413);
 });
 
@@ -188,15 +188,6 @@ await run("per-minute provider 429 → retryable rate_limited with Retry-After",
   assert.equal(r.headers.get("retry-after"), "1");
 });
 
-await run("daily free-tier quota → non-retryable provider_quota", async () => {
-  const r = await post("/api/tts", { ...opts, text: "DAILYQUOTA reached" });
-  const j = await r.json();
-  assert.equal(r.status, 429);
-  assert.equal(j.error.code, "provider_quota");
-  assert.equal(j.error.retryable, false);
-  assert.match(j.error.message, /tomorrow/);
-});
-
 await run("provider timeout → 504", async () => {
   const r = await post("/api/tts", { ...opts, text: "SLOW response" });
   assert.equal(r.status, 504);
@@ -210,6 +201,23 @@ await run("per-IP request rate limit kicks in", async () => {
     if ((await post("/api/tts/plan", { text: "hi" }, { ip })).status === 429) limited = true;
   }
   assert.ok(limited);
+});
+
+// These run last: they mark models as exhausted for the rest of the server's life.
+await run("primary model's daily quota used up → falls back to the next model", async () => {
+  const r = await post("/api/tts", { ...opts, text: "PRIMARYQUOTA hello" });
+  assert.equal(r.status, 200, await r.clone().text());
+  // Later requests skip the exhausted primary model directly and keep working.
+  assert.equal((await post("/api/tts", { ...opts, text: "after fallback" })).status, 200);
+});
+
+await run("daily quota used up on every model → non-retryable provider_quota", async () => {
+  const r = await post("/api/tts", { ...opts, text: "DAILYQUOTA reached" });
+  const j = await r.json();
+  assert.equal(r.status, 429);
+  assert.equal(j.error.code, "provider_quota");
+  assert.equal(j.error.retryable, false);
+  assert.match(j.error.message, /tomorrow/);
 });
 
 for (const [s, n, m] of results) console.log(`${s}  ${n}${m ? `\n      ${m}` : ""}`);

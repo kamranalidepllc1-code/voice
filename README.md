@@ -21,7 +21,7 @@ Browser                                   Next.js server                    Gemi
 ───────                                   ──────────────                    ──────────
 POST /api/tts/plan {text}  ─────────────▶ validate ≤4,000 words / 40k chars,
                            ◀───────────── split at paragraph → sentence → word
-                                          boundaries into ≤3,000-char parts
+                                          boundaries into ≤4,500-char parts
 for each part (2 at a time):
 POST /api/tts {text, voice} ────────────▶ validate, rate-limit ──▶ POST models/{model}:generateContent
                            ◀──────────── WAV (PCM wrapped)    ◀── base64 audio (L16 PCM or WAV)
@@ -29,8 +29,12 @@ merge parts in the browser → one WAV → <audio> player + Download
 ```
 
 - **Few, large requests:** Gemini TTS accepts 8,192 input tokens and returns up to 16,384 audio tokens
-  (~10 min) per request. Parts of ≤3,000 chars (~3–4 min of audio) stay safely inside both, so a typical
-  4,000-word text needs about 8–10 requests. This matters because free-tier daily request quotas are small.
+  (~10 min) per request. Parts of ≤4,500 chars (~5 min of audio) stay safely inside both, so a typical
+  4,000-word text needs about 6 requests. This matters because free-tier daily request quotas are small.
+- **Model fallback:** free-tier quotas are counted per model. When one model's daily quota is used up, the
+  server switches to the next model in `GEMINI_TTS_MODELS` (default: `gemini-3.8-flash-tts` →
+  `gemini-3.8-flash-lite-tts` → `gemini-2.5-flash-preview-tts`). It skips exhausted or unavailable models
+  until the quota resets. Different models can sound slightly different, even with the same voice.
 - **Merging:** each part becomes a 24 kHz mono 16-bit WAV, and the parts are joined under one RIFF header.
 - **Reliability:** per-minute rate limits (429 with a short `retryDelay`) are waited out automatically, with a
   countdown in the UI. 5xx errors, timeouts and the occasional empty response are retried with backoff. A
@@ -71,7 +75,7 @@ The integration suite covers:
 
 1. Set `GEMINI_API_KEY` (and any optional limits) in the project's environment variables.
 2. `/api/tts` declares `maxDuration = 300`; each part usually takes well under a minute.
-3. **Response size:** a 3,000-char part is ~3–4 min of WAV (~9–11 MB). Platforms with a small response-body
+3. **Response size:** a 4,500-char part is ~5 min of WAV (~14 MB). Platforms with a small response-body
    cap (Vercel: 4.5 MB for non-streamed responses) need a smaller `CHUNK_CHARS` in `src/lib/tts/config.ts`
    (e.g. 1,200), at the cost of more requests.
 4. The rate limits are **in memory, per instance**. On multi-instance/serverless hosting, move them to a shared
@@ -86,7 +90,6 @@ The integration suite covers:
 - 30 prebuilt voices (Kore, Puck, Charon, Zephyr, …). The language is detected automatically, and the model
   supports 130 languages.
 - **Free tier:** input and output are free, **but Google may use free-tier data to improve its products**, and
-  the daily request quotas are small. Check yours in AI Studio. A 4,000-word text (~8–10 requests) may use up a
-  day's free quota.
+  the daily request quotas are small (per model). Check yours in AI Studio. A 4,000-word text takes ~6 requests.
 - **Paid tier** (gemini-3.8-flash-tts, through Dec 31, 2026): $0.50 per 1M input tokens and $9.00 per 1M audio
   output tokens (~25 tokens per second). 4,000 words ≈ 27 min of audio ≈ **$0.37**.
