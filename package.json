@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test tests/text.test.mjs tests/audio.test.mjs",
+    "test:mock-gemini": "node tests/mock-gemini.mjs 4012",
+    "test:integration": "node tests/integration.mjs"
   },
   "dependencies": {
     "next": "16.4.2",
