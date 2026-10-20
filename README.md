@@ -22,7 +22,7 @@ Browser                                   Next.js server                    Gemi
 POST /api/tts/plan {text}  ─────────────▶ validate ≤4,000 words / 40k chars,
                            ◀───────────── split at paragraph → sentence → word
                                           boundaries into ≤4,500-char parts
-for each part (2 at a time):
+for each part (one at a time, ≥21 s apart):
 POST /api/tts {text, voice} ────────────▶ validate, rate-limit ──▶ POST models/{model}:generateContent
                            ◀──────────── WAV (PCM wrapped)    ◀── base64 audio (L16 PCM or WAV)
 merge parts in the browser → one WAV → <audio> player + Download

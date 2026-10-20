@@ -29,7 +29,13 @@ interface Options {
   voice: string;
 }
 
-const CONCURRENCY = 2;
+/**
+ * Gemini's free tier allows 3 requests per minute per model, and rejected
+ * requests still count toward the 10-per-day quota. So requests go one at a
+ * time and at least 21 s apart, instead of bursting and hitting the limit.
+ */
+const CONCURRENCY = 1;
+const MIN_REQUEST_INTERVAL_MS = 21_000;
 /** Attempts for transient failures (5xx, timeouts, network). */
 const MAX_ATTEMPTS = 3;
 /** Provider rate-limit waits allowed per part before giving up (each ≤ ~2 min). */
@@ -106,6 +112,7 @@ export default function TextToSpeech() {
   const [segments, setSegments] = useState<Segment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [waitUntil, setWaitUntil] = useState<number | null>(null);
+  const [waitReason, setWaitReason] = useState("");
   const [now, setNow] = useState(0);
   const [result, setResult] = useState<{ url: string; size: number } | null>(null);
   const [showParts, setShowParts] = useState(false);
@@ -116,6 +123,8 @@ export default function TextToSpeech() {
   // Generated audio keyed by (options + chunk text): avoids paying twice for identical requests.
   const cacheRef = useRef(new Map<string, Blob>());
   const urlsRef = useRef<string[]>([]);
+  // When the last /api/tts request started (for client-side pacing).
+  const lastRequestAtRef = useRef(0);
 
   const busy = status === "planning" || status === "generating" || status === "merging";
 
@@ -182,9 +191,24 @@ export default function TextToSpeech() {
     const cached = cacheRef.current.get(key);
     if (cached) return cached;
 
+    const wait = async (ms: number, reason: string) => {
+      setNow(Date.now());
+      setWaitUntil(Date.now() + ms);
+      setWaitReason(reason);
+      try {
+        await sleep(ms, signal);
+      } finally {
+        setWaitUntil(null);
+      }
+    };
+
     let attempts = 0;
     let rateLimitWaits = 0;
     for (;;) {
+      // Pace requests to stay under the provider's per-minute limit.
+      const gap = lastRequestAtRef.current + MIN_REQUEST_INTERVAL_MS - Date.now();
+      if (gap > 0) await wait(gap, "pacing for the 3-requests-per-minute limit");
+      lastRequestAtRef.current = Date.now();
       try {
         const res = await fetch("/api/tts", {
           method: "POST",
@@ -209,14 +233,7 @@ export default function TextToSpeech() {
         // counting it as a failed attempt.
         if (e.code === "rate_limited" && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
           rateLimitWaits++;
-          const ms = Math.min((e.retryAfter ?? 6) * 1000, 120_000) + Math.random() * 1000;
-          setNow(Date.now());
-          setWaitUntil(Date.now() + ms);
-          try {
-            await sleep(ms, signal);
-          } finally {
-            setWaitUntil(null);
-          }
+          await wait(Math.min((e.retryAfter ?? 20) * 1000, 120_000) + Math.random() * 1000, "rate limit reached");
           continue;
         }
         if (++attempts >= MAX_ATTEMPTS) throw e;
@@ -467,7 +484,7 @@ export default function TextToSpeech() {
                 {status === "merging"
                   ? "Combining audio…"
                   : `Generated ${doneCount} of ${segments.length} part${segments.length === 1 ? "" : "s"}`}
-                {waitUntil && status === "generating" && ` · rate limit reached, resuming in ${waitSeconds}s`}
+                {waitUntil && status === "generating" && ` · ${waitReason}, next request in ${waitSeconds}s`}
               </span>
               <span>{progress}%</span>
             </div>
